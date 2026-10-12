@@ -31,6 +31,13 @@ import httpx
 from bleak import BleakClient, BleakScanner
 from bleak.exc import BleakError
 
+if sys.stdout is None:
+    # Windows pythonw.exe (Task Scheduler autostart) has no console. Must run
+    # before Dashboard() below, which probes sys.stdout at import time.
+    _log_path = Path.home() / ".clawd" / "daemon.log"
+    _log_path.parent.mkdir(parents=True, exist_ok=True)
+    sys.stdout = sys.stderr = open(_log_path, "a", encoding="utf-8", buffering=1)
+
 DEVICE_NAME = "Clawdometer"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
@@ -39,12 +46,15 @@ REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
 POLL_INTERVAL = 60
 TICK = 5
 SCAN_TIMEOUT = 8.0
-CONNECT_TIMEOUT = 20.0
+# Windows (WinRT) GATT connects take ~15-20s on their own, so allow more there.
+CONNECT_TIMEOUT = 45.0 if sys.platform == "win32" else 20.0
 
 # macOS: token lives in Keychain (service "Claude Code-credentials").
 # Linux: token lives in ~/.claude/.credentials.json.
 KEYCHAIN_SERVICE = "Claude Code-credentials"
 DEFAULT_CONFIG_DIR = Path.home() / ".claude"
+# Optional: a `claude setup-token` token (valid ~1 year), one line, nothing else.
+LONG_LIVED_TOKEN_FILE = Path.home() / ".clawd" / "oauth_token"
 SAVED_ADDR_FILE = Path.home() / ".config" / "claude-usage-monitor" / "ble-address"
 CONFIG_FILE = Path.home() / ".config" / "claude-usage-monitor" / "config"
 
@@ -123,6 +133,8 @@ class Dashboard:
         self.token_note: str | None = None
         self._painted = False
         if self.enabled:
+            if os.name == "nt":
+                os.system("")  # turns on ANSI escape processing in legacy Windows consoles
             import atexit
             atexit.register(lambda: sys.stdout.write("\x1b[?25h\x1b[0m\n"))
 
@@ -372,6 +384,17 @@ def read_token_for(config_dir: Path) -> tuple[str | None, float | None]:
     blob carries no expiry.
     """
     blob = None
+    if config_dir == DEFAULT_CONFIG_DIR:
+        # A long-lived `claude setup-token` token wins: on Windows the desktop
+        # app doesn't refresh .credentials.json, so that file's token goes stale.
+        blob = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") or None
+        try:
+            if not blob and LONG_LIVED_TOKEN_FILE.exists():
+                blob = LONG_LIVED_TOKEN_FILE.read_text().strip() or None
+        except OSError as e:
+            log(f"Error reading {LONG_LIVED_TOKEN_FILE}: {e}")
+        if blob:
+            return _extract_access_token(blob), None
     cred = config_dir / ".credentials.json"
     try:
         if cred.exists():
@@ -521,6 +544,16 @@ async def discover_target(skip_addr: str | None = None):
             log(f"Found: {dev.address}")
         return dev
 
+    if sys.platform == "win32":
+        # Hand BleakClient the scanned BLEDevice: given a bare address it
+        # re-scans before connecting, which on top of WinRT's slow connect
+        # blows past CONNECT_TIMEOUT.
+        log(f"Scanning for '{DEVICE_NAME}' ({SCAN_TIMEOUT}s)...")
+        dev = await BleakScanner.find_device_by_name(DEVICE_NAME, timeout=SCAN_TIMEOUT)
+        if dev:
+            log(f"Found: {dev.address}")
+        return dev
+
     address = load_cached_address()
     if not address:
         address = await scan_for_device()
@@ -582,6 +615,14 @@ def add_chime_field(payload: dict) -> None:
 
 def detect_hour_format() -> int:
     """Best-effort 12h/24h detection for the host. Returns 12 or 24 (default 24)."""
+    if os.name == "nt":
+        # Windows: iTime is "1" for 24-hour, "0" for 12-hour (Region settings).
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\International") as k:
+                return 24 if winreg.QueryValueEx(k, "iTime")[0] == "1" else 12
+        except OSError:
+            return 24
     # macOS: the explicit System Settings toggle lives in NSGlobalDomain.
     for key, result in (("AppleICUForce24HourTime", 24), ("AppleICUForce12HourTime", 12)):
         try:
@@ -798,7 +839,7 @@ def compute_usage_stats() -> dict:
         sid = os.path.basename(f)[:8]
         events = []  # (datetime, role) within this session, for gap classification
         try:
-            fh = open(f, errors="ignore")
+            fh = open(f, encoding="utf-8", errors="ignore")  # Windows defaults to cp1252
         except OSError:
             continue
         with fh:
@@ -1137,7 +1178,7 @@ async def main() -> None:
         except NotImplementedError:
             signal.signal(sig, _stop)
 
-    log("=== Claude Usage Tracker Daemon (BLE, macOS) ===")
+    log(f"=== Claude Usage Tracker Daemon (BLE, {sys.platform}) ===")
     log(f"Poll interval: {POLL_INTERVAL}s")
 
     backoff = 1

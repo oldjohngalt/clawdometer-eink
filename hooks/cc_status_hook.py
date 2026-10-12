@@ -93,7 +93,9 @@ def last_reply_question(transcript_path):
 
 def main() -> int:
     try:
-        data = json.load(sys.stdin)
+        # Read bytes: on Windows, text-mode stdin decodes as cp1252, not UTF-8.
+        # utf-8-sig also drops the BOM PowerShell prepends when piping.
+        data = json.loads(sys.stdin.buffer.read().decode("utf-8-sig", "replace"))
     except Exception:
         data = {}
 

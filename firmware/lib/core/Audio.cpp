@@ -16,6 +16,7 @@
 #define MCLK_MULT   256
 
 static bool s_ready = false;
+static es8311_handle_t s_dev = nullptr;
 
 void audioInit() {
   pinMode(AUD_PA_EN, OUTPUT);   digitalWrite(AUD_PA_EN, LOW);     // codec power ON (active-low)
@@ -61,9 +62,8 @@ void audioInit() {
   if (es8311_init(h, &clk, ES8311_RESOLUTION_16, ES8311_RESOLUTION_16) != ESP_OK) {
     Serial.println("[Audio] es8311 init failed"); return;
   }
-  // 75 maps to DAC reg 0xBF = 0 dB (was 60 = -19.5 dB). Above 75 the codec adds
-  // digital gain, and the 0.85-amplitude chime tones start to clip.
-  es8311_voice_volume_set(h, 75, NULL);
+  s_dev = h;
+  audioSetVolume(50);   // upstream default (-19.5 dB) until the daemon sends "v"
   es8311_microphone_config(h, false);
 
   digitalWrite(AUD_PA_CTRL, LOW);   // amp OFF until a chime (saves continuous current)
@@ -129,6 +129,15 @@ void chimePlay(ChimeId id) {
     case CHIME_RECOVERED: playMelody(M_RECOV, 2, 0.85f); break;
     case CHIME_LOW_BATT:  playMelody(M_LOWB,  2, 0.60f); break;
   }
+}
+
+void audioSetVolume(int pct) {
+  if (!s_dev) return;
+  pct = constrain(pct, 0, 100);
+  // es8311 volume 75 = DAC reg 0xBF = 0 dB; above that the codec adds digital
+  // gain and the 0.85-amplitude chime tones clip. Map 1-100 onto 45-75
+  // (-38.5..0 dB) so the scale is roughly even to the ear.
+  es8311_voice_volume_set(s_dev, pct == 0 ? 0 : 45 + pct * 30 / 100, NULL);
 }
 
 void chime(bool workDone) { chimePlay(workDone ? CHIME_DONE : CHIME_NEEDS_YOU); }

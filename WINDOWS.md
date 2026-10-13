@@ -53,6 +53,15 @@ Autostart at logon (windowless, logs to `~\.clawd\daemon.log`):
 .\install_autostart.ps1 -Remove    # uninstall
 ```
 
+Options go in `%USERPROFILE%\.config\claude-usage-monitor\config`, one `key=value`
+per line, re-read every poll (no restart needed):
+
+```
+volume=75      # chime volume 0-100 (0 silent, 50 = upstream default, 100 = max); device plays a preview on change
+chime=on       # session-reset chime
+clock=auto     # show the time (auto|12|24|off)
+```
+
 ## 4. Hooks
 
 ```powershell

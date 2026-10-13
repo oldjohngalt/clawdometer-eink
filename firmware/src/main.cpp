@@ -34,6 +34,10 @@ static volatile bool g_dirty = false;
 static volatile uint8_t g_chimeMask = 0;
 static inline void reqChime(ChimeId id) { g_chimeMask |= (uint8_t)(1 << id); }
 static bool g_chimeOn = true;               // chime enabled (persisted in NVS)
+// Volume from the daemon ("v"). Applied in loop(): the codec is on the I2C bus the
+// sensors share, so it must not be touched from the BLE callback task.
+static volatile int g_volReq = -1;
+static int g_volCur = -1;                    // -1 = not yet set since boot
 static unsigned long g_lastRenderMs = 0;
 static const unsigned long HEARTBEAT_MS = 5UL * 60 * 1000;  // 5-min idle redraw
 
@@ -138,6 +142,8 @@ static void onBleData(const std::string& json) {
   snprintf(g_st.cc,     sizeof(g_st.cc),     "%s", newCc);
   snprintf(g_st.ccMsg,  sizeof(g_st.ccMsg),  "%s", (const char*)(d["ccm"] | ""));
   g_st.ccTs = d["cct"] | 0L;
+  int v = d["v"] | -1;
+  if (v >= 0 && v <= 100) g_volReq = v;
 
   // Usage stats (don't trigger a redraw; only shown on the stats views via BOOT)
   JsonArrayConst hh = d["hh"].as<JsonArrayConst>();
@@ -285,6 +291,14 @@ void loop() {
     lowBattChimed = true;
   } else if (g_st.batt > 15) {
     lowBattChimed = false;
+  }
+
+  // Preview only a real change; the first value after boot/wake is applied silently.
+  int vr = g_volReq;
+  if (vr >= 0 && vr != g_volCur) {
+    audioSetVolume(vr);
+    if (g_volCur >= 0) reqChime(CHIME_DONE);
+    g_volCur = vr;
   }
 
   // play the single most important pending jingle (respects the PWR mute)

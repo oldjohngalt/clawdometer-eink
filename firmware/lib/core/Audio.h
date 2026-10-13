@@ -13,4 +13,5 @@ enum ChimeId {
 
 void audioInit();           // power codec + I2S (call after the I2C bus is up)
 void chimePlay(ChimeId id); // play one jingle (amp toggles around it)
+void audioSetVolume(int pct); // 0 = silent, 1-100 = -38.5..0 dB (100 = codec max w/o clipping)
 void chime(bool workDone);  // legacy 2-tone API -> DONE / NEEDS_YOU jingles

@@ -606,11 +606,38 @@ def read_clock_setting() -> str:
     return "off"
 
 
+def read_volume_setting() -> int | None:
+    """Read the `volume` option (0-100) from the config file, or None if unset.
+
+    Re-read on every poll, so an edit takes effect within POLL_INTERVAL without
+    restarting the daemon.
+    """
+    try:
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                if key.strip().lower() == "volume":
+                    try:
+                        return max(0, min(100, int(val.strip())))
+                    except ValueError:
+                        return None
+    except OSError:
+        pass
+    return None
+
+
 def add_chime_field(payload: dict) -> None:
     """Add "c":1 to the payload when the config opts in, so the firmware may
-    sound the session-reset chime. Omitted entirely when chime is off."""
+    sound the session-reset chime. Omitted entirely when chime is off.
+    Also adds "v" (chime volume 0-100) when the config sets one."""
     if read_chime_setting() == "on":
         payload["c"] = 1
+    vol = read_volume_setting()
+    if vol is not None:
+        payload["v"] = vol
 
 
 def detect_hour_format() -> int:

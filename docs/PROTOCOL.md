@@ -24,6 +24,8 @@ The device requests MTU 512 — the payload (~450 B) must fit one write. Writes 
   "st": "allowed",  // rate-limit status: allowed | allowed_warning | rejected | limited
   "acct": "pro",    // pro | ent
   "ok": true,
+  "v": 75,          // optional chime volume 0-100 (0 silent, 100 = 0 dB); from config `volume=`.
+                    // Device previews with a ta-daa when it changes (not on the first value after boot)
 
   // Claude Code status (omitted when no fresh hook data)
   "cc": "question",           // working | needs-you | question | done

@@ -61,7 +61,9 @@ void audioInit() {
   if (es8311_init(h, &clk, ES8311_RESOLUTION_16, ES8311_RESOLUTION_16) != ESP_OK) {
     Serial.println("[Audio] es8311 init failed"); return;
   }
-  es8311_voice_volume_set(h, 60, NULL);
+  // 75 maps to DAC reg 0xBF = 0 dB (was 60 = -19.5 dB). Above 75 the codec adds
+  // digital gain, and the 0.85-amplitude chime tones start to clip.
+  es8311_voice_volume_set(h, 75, NULL);
   es8311_microphone_config(h, false);
 
   digitalWrite(AUD_PA_CTRL, LOW);   // amp OFF until a chime (saves continuous current)

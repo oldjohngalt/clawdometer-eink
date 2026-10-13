@@ -283,7 +283,7 @@ void renderClawd(const ClawdState& s, bool full) {
     if (!s.linked) {
       display.setFont(&FreeSans9pt7b);
       display.setCursor(PAD, 110);
-      display.print("waiting for Mac...");
+      display.print("waiting for PC...");
       display.setCursor(PAD, 132);
       display.print("(run the daemon)");
     } else if (!s.haveData) {

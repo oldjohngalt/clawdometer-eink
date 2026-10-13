@@ -194,7 +194,7 @@ void setup() {
   g_st.chimeOn = g_chimeOn;
   g_st.batt = batteryPercent();
   if (!fromSleep) {
-    renderClawd(g_st, true);   // "waiting for Mac..." (cold boot only)
+    renderClawd(g_st, true);   // "waiting for PC..." (cold boot only)
     g_sleptBadge = false;
   } else {
     // Woken from deep sleep: the panel still shows the last state (with zZ).

@@ -686,6 +686,80 @@ def add_clock_fields(payload: dict) -> None:
     payload["tf"] = tf
 
 
+# Remote Claude Code hosts (config `remote_status = user@host[, ...]`): the hook
+# writes ~/.clawd/cc_status.json there, and one long-lived ssh per host streams it
+# here. The ssh key should be restricted on the remote side to exactly
+# REMOTE_STATUS_CMD (authorized_keys command="..."), so it can't open a shell.
+REMOTE_STATUS_CMD = ('while :; do cat ~/.clawd/cc_status.json 2>/dev/null || printf "{}"; '
+                     'echo; sleep 2; done')
+_remote_cc: dict[str, dict] = {}   # host -> latest status dict streamed from it
+
+
+def read_remote_hosts() -> list[str]:
+    try:
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                if key.strip().lower() == "remote_status":
+                    return [h.strip() for h in val.split(",") if h.strip()]
+    except OSError:
+        pass
+    return []
+
+
+async def stream_remote_status(host: str, stop_event: asyncio.Event) -> None:
+    """Keep an ssh stream of `host`'s status file open, reconnecting with backoff."""
+    key = Path.home() / ".ssh" / "id_ed25519_clawd"
+    args = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15",
+            "-o", "ServerAliveCountMax=2", "-o", "ConnectTimeout=10"]
+    if key.exists():
+        args += ["-i", str(key), "-o", "IdentitiesOnly=yes"]
+    args += [host, REMOTE_STATUS_CMD]
+    # pythonw has no console; without this every ssh launch flashes a window.
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    backoff = 5
+    while not stop_event.is_set():
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE, creationflags=flags)
+        except OSError as e:
+            log(f"Remote {host}: cannot start ssh: {e}")
+            return
+        log(f"Remote {host}: streaming status")
+        got_any = False
+        try:
+            while not stop_event.is_set():
+                line = await proc.stdout.readline()
+                if not line:
+                    break
+                try:
+                    d = json.loads(line.decode("utf-8", "replace"))
+                except ValueError:
+                    continue
+                if isinstance(d, dict):
+                    _remote_cc[host] = d
+                    got_any = True
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+            err = (await proc.stderr.read()).decode("utf-8", "replace").strip()
+            await proc.wait()
+        _remote_cc.pop(host, None)
+        if stop_event.is_set():
+            return
+        log(f"Remote {host}: ssh ended (rc={proc.returncode})"
+            + (f": {err.splitlines()[-1]}" if err else ""))
+        backoff = 5 if got_any else min(backoff * 2, 300)
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=backoff)
+        except asyncio.TimeoutError:
+            pass
+
+
 def read_cc_status() -> dict:
     """Read the Claude Code interaction status written by the CC hooks.
 
@@ -693,11 +767,23 @@ def read_cc_status() -> dict:
     the file is absent, malformed, or older than CC_STALE_SECS (so a crashed or
     long-idle CC session doesn't pin a stale banner on the device).
     "cc"  = state (working|needs-you|done), "ccm" = short message, "cct" = ts.
+    The local file and any streamed remote hosts are merged: newest ts wins.
     """
+    candidates = list(_remote_cc.values())
     try:
-        d = json.loads(CC_STATUS_FILE.read_text())
+        candidates.append(json.loads(CC_STATUS_FILE.read_text()))
     except (OSError, ValueError, TypeError):
+        pass
+
+    def ts_of(d) -> int:
+        try:
+            return int(d.get("ts", 0))
+        except (ValueError, TypeError, AttributeError):
+            return 0
+    candidates = [d for d in candidates if isinstance(d, dict) and d.get("state")]
+    if not candidates:
         return {}
+    d = max(candidates, key=ts_of)
     state = str(d.get("state", "")).strip()
     if not state:
         return {}
@@ -1005,7 +1091,7 @@ class Session:
                 self.client.start_notify(REQ_CHAR_UUID, self._on_refresh),
                 timeout=10,
             )
-        except (BleakError, ValueError) as e:
+        except (BleakError, ValueError, OSError) as e:
             log(f"Refresh subscription unavailable: {e}")
         except asyncio.TimeoutError:
             log("Refresh subscription timed out; polling without it")
@@ -1017,7 +1103,7 @@ class Session:
         ok = True
         try:
             await self.client.write_gatt_char(RX_CHAR_UUID, data, response=False)
-        except BleakError as e:
+        except (BleakError, OSError) as e:  # WinRT: OSError once the link is closed
             log(f"Write failed: {e}")
             ok = False
         if DASH.enabled:
@@ -1132,7 +1218,7 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
         # handler below already treats as a connection failure -> drop the
         # cached address and rescan.
         await asyncio.wait_for(client.connect(), timeout=CONNECT_TIMEOUT)
-    except (BleakError, asyncio.TimeoutError) as e:
+    except (BleakError, asyncio.TimeoutError, OSError) as e:
         log(f"Connection failed: {e}")
         if sys.platform == "darwin" and _is_encryption_error(e):
             log("Encryption failed — likely a stale macOS bond; self-healing")
@@ -1184,7 +1270,7 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
     finally:
         try:
             await client.disconnect()
-        except BleakError:
+        except (BleakError, OSError):
             pass
 
     log("Device disconnected" if not stop_event.is_set() else "Stopping")
@@ -1207,6 +1293,8 @@ async def main() -> None:
 
     log(f"=== Claude Usage Tracker Daemon (BLE, {sys.platform}) ===")
     log(f"Poll interval: {POLL_INTERVAL}s")
+    remote_tasks = [asyncio.create_task(stream_remote_status(h, stop_event))
+                    for h in read_remote_hosts()]  # noqa: F841 (kept alive by the loop)
 
     backoff = 1
     skip_addr: str | None = None  # macOS: a peripheral to skip for one cycle
@@ -1225,7 +1313,11 @@ async def main() -> None:
             continue
 
         addr = target if isinstance(target, str) else target.address
-        ok = await connect_and_run(target, stop_event)
+        try:
+            ok = await connect_and_run(target, stop_event)
+        except Exception as e:  # any BLE-stack surprise = a dropped link, never a dead daemon
+            log(f"Link error: {type(e).__name__}: {e}")
+            ok = False
         if not ok:
             if sys.platform == "darwin":
                 # No string cache to drop; instead skip this stale handle on
@@ -1244,7 +1336,16 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        sys.exit(0)
+    # Last line of defence: an unexpected crash restarts the loop after a pause
+    # instead of leaving the device to fall asleep with no daemon (Task
+    # Scheduler's restart-on-failure doesn't reliably catch pythonw exits).
+    while True:
+        try:
+            asyncio.run(main())
+            break
+        except KeyboardInterrupt:
+            sys.exit(0)
+        except Exception:
+            import traceback
+            log("Daemon crashed; restarting in 30s: " + traceback.format_exc())
+            time.sleep(30)

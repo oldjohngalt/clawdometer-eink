@@ -101,6 +101,16 @@ def main() -> int:
 
     event = data.get("hook_event_name", "")
     tool = str(data.get("tool_name", "") or "")
+
+    if os.environ.get("CLAWD_HOOK_DEBUG") or (CC_DIR / "hook_debug").exists():
+        try:  # one line per event, to see what the host actually sends
+            with open(CC_DIR / "hook_events.log", "a", encoding="utf-8") as f:
+                f.write(json.dumps({"t": time.strftime("%H:%M:%S"), "ev": event,
+                                    "tool": tool, "ntype": data.get("notification_type"),
+                                    "msg": str(data.get("message", ""))[:60],
+                                    "sid": str(data.get("session_id", ""))[:8]}) + "\n")
+        except OSError:
+            pass
     if event == "PreToolUse" and tool == "AskUserQuestion":
         # Claude is explicitly asking the user to choose something — show the
         # first question's text (shortened) under the banner.

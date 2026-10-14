@@ -760,6 +760,44 @@ async def stream_remote_status(host: str, stop_event: asyncio.Event) -> None:
             pass
 
 
+def read_idle_sleep_secs() -> int:
+    """`idle_sleep` option, in minutes (default 15; 0 = never). After Claude Code
+    has been quiet this long the daemon tells the device to deep-sleep ("z":1)
+    and only reconnects on its 10-min timer wakes. Staying linked costs the
+    battery ~20-30 mA; this is what makes it last days instead of hours."""
+    try:
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                if key.strip().lower() == "idle_sleep":
+                    return max(0, int(val.strip())) * 60
+    except (OSError, ValueError):
+        pass
+    return 15 * 60
+
+
+def cc_idle_seconds() -> float:
+    """Seconds since the newest Claude Code hook event (local or remote)."""
+    newest = 0
+    sources = list(_remote_cc.values())
+    try:
+        sources.append(json.loads(CC_STATUS_FILE.read_text()))
+    except (OSError, ValueError, TypeError):
+        pass
+    for d in sources:
+        try:
+            newest = max(newest, int(d.get("ts", 0)))
+        except (ValueError, TypeError, AttributeError):
+            pass
+    return time.time() - newest if newest else float("inf")
+
+
+_idle_sleep_sent_at = 0.0   # when we last told the device to sleep
+
+
 def read_cc_status() -> dict:
     """Read the Claude Code interaction status written by the CC hooks.
 
@@ -1256,12 +1294,22 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
             # push the moment it changes — no extra API calls. On a push failure
             # pushed_cc stays stale, so the next tick retries automatically.
             cc = read_cc_status()
-            if last_payload is not None and cc != pushed_cc:
+            idle_limit = read_idle_sleep_secs()
+            idle = idle_limit > 0 and cc_idle_seconds() >= idle_limit
+            if last_payload is not None and (cc != pushed_cc or idle):
                 payload = dict(last_payload)
                 payload.update(cc)
+                if idle:
+                    payload["z"] = 1
                 if await session.write_payload(payload):
                     pushed_cc = cc
                     used_successfully = True
+                    if idle:
+                        global _idle_sleep_sent_at
+                        _idle_sleep_sent_at = time.time()
+                        log("Claude Code idle; device told to sleep until its next timer wake")
+                        await asyncio.sleep(2)   # let the write land before dropping the link
+                        break
 
             try:
                 await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)
@@ -1299,6 +1347,16 @@ async def main() -> None:
     backoff = 1
     skip_addr: str | None = None  # macOS: a peripheral to skip for one cycle
     while not stop_event.is_set():
+        # Just put the device to sleep: don't catch it in the seconds before it
+        # actually goes down and keep it awake.
+        quiet = 60 - (time.time() - _idle_sleep_sent_at)
+        if quiet > 0:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=quiet)
+            except asyncio.TimeoutError:
+                pass
+            continue
+
         # Apply any pending skip exactly once, then clear it so the next
         # cycle re-tries retrieveConnected (the device may have recovered).
         target = await discover_target(skip_addr=skip_addr)
@@ -1309,7 +1367,9 @@ async def main() -> None:
                 await asyncio.wait_for(stop_event.wait(), timeout=backoff)
             except asyncio.TimeoutError:
                 pass
-            backoff = min(backoff * 2, 60)
+            # <=20s: retry + 8s scan + ~25s WinRT connect must fit the device's
+            # 90s timer-wake window, or a sleeping device is never reached.
+            backoff = min(backoff * 2, 20)
             continue
 
         addr = target if isinstance(target, str) else target.address

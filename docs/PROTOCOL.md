@@ -26,6 +26,9 @@ The device requests MTU 512 — the payload (~450 B) must fit one write. Writes 
   "ok": true,
   "v": 75,          // optional chime volume 0-100 (0 silent, 100 = 0 dB); from config `volume=`.
                     // Device previews with a ta-daa when it changes (not on the first value after boot)
+  "z": 1,           // optional: Claude Code idle -> render, then deep-sleep now (until the 10-min
+                    // timer or a button) instead of idling awake 5 min after the daemon disconnects.
+                    // Ignored for 2 min after a button press. Config `idle_sleep=` minutes (0 = off)
 
   // Claude Code status (omitted when no fresh hook data)
   "cc": "question",           // working | needs-you | question | done

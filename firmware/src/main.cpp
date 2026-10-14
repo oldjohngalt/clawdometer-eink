@@ -58,6 +58,13 @@ static RTC_DATA_ATTR bool g_everLinked = false;  // daemon seen since power-on (
 static unsigned long g_lastLinkMs = 0;   // last time the BLE link was up (or a button woke us)
 static unsigned long g_lastDataMs = 0;   // last daemon push
 static bool g_sniff = false;             // in a timer-wake sniff window
+// Daemon "z":1 = nothing is happening, sleep now instead of idling awake for
+// UNLINKED_SLEEP_MS after it disconnects. Ignored for 2 min after a button press
+// so the user can still look at the stats views.
+static const unsigned long BTN_HOLDOFF_MS = 2UL * 60 * 1000;
+static volatile bool g_sleepReq = false;
+static bool g_btnUsed = false;
+static unsigned long g_lastBtnMs = 0;
 static unsigned long g_sniffDeadline = 0;
 
 static void goToSleep() {
@@ -165,6 +172,8 @@ static void onBleData(const std::string& json) {
   g_lastDataMs = millis();
   g_sniff = false;               // daemon is alive -> stay awake, normal rules
   if (changed) g_dirty = true;
+  if ((d["z"] | 0) && !(g_btnUsed && millis() - g_lastBtnMs < BTN_HOLDOFF_MS))
+    g_sleepReq = true;
   Serial.printf("[Clawd] s=%d w=%d st=%s cc=%s changed=%d\n",
                 newS, newW, newSt, newCc, changed);
 }
@@ -211,6 +220,7 @@ void setup() {
   g_lastRenderMs = millis();
   g_lastLinkMs = millis();
   g_lastDataMs = millis();
+  if (wake == ESP_SLEEP_WAKEUP_EXT1) { g_btnUsed = true; g_lastBtnMs = millis(); }
   if (wake == ESP_SLEEP_WAKEUP_TIMER) {
     g_sniff = true;            // short look-around; back to sleep if no daemon
     g_sniffDeadline = millis() + SNIFF_WINDOW_MS;
@@ -243,6 +253,7 @@ void loop() {
   // BOOT: cycle meters -> today(hourly) -> 7 days -> 30 days -> meters.
   if (btnBoot.poll() == BTN_SHORT) {
     g_lastLinkMs = now;              // user present: reset the sleep timer
+    g_btnUsed = true; g_lastBtnMs = now; g_sleepReq = false;
     g_sniff = false;
     if (g_st.haveData) {             // without data there is nothing to cycle
       g_st.view = (g_st.view + 1) % 4;
@@ -257,6 +268,7 @@ void loop() {
     ble.readvertise();
   } else if (pe == BTN_SHORT) {
     g_lastLinkMs = now;              // user present: reset the sleep timer
+    g_btnUsed = true; g_lastBtnMs = now; g_sleepReq = false;
     g_sniff = false;
     g_chimeOn = !g_chimeOn;
     g_prefs.putBool("chime", g_chimeOn);
@@ -326,6 +338,9 @@ void loop() {
     g_lastRenderMs = millis();
     g_sleptBadge = false;      // live image on screen -> next sleep re-badges it
   }
+
+  // After this pass's redraw and chime, so the panel shows the final state.
+  if (g_sleepReq) { g_sleepReq = false; goToSleep(); }
 
   delay(50);
 }

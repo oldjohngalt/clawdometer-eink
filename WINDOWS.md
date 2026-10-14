@@ -58,6 +58,7 @@ per line, re-read every poll (no restart needed):
 
 ```
 volume=75      # chime volume 0-100 (0 silent, 50 = upstream default, 100 = max); device plays a preview on change
+idle_sleep=15  # minutes of Claude Code inactivity before the device deep-sleeps (0 = stay linked)
 chime=on       # session-reset chime
 clock=auto     # show the time (auto|12|24|off)
 ```

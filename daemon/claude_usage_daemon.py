@@ -796,6 +796,7 @@ def cc_idle_seconds() -> float:
 
 
 _idle_sleep_sent_at = 0.0   # when we last told the device to sleep
+IDLE_QUIET_SECS = 6 * 60
 
 
 def read_cc_status() -> dict:
@@ -1347,9 +1348,11 @@ async def main() -> None:
     backoff = 1
     skip_addr: str | None = None  # macOS: a peripheral to skip for one cycle
     while not stop_event.is_set():
-        # Just put the device to sleep: don't catch it in the seconds before it
-        # actually goes down and keep it awake.
-        quiet = 60 - (time.time() - _idle_sleep_sent_at)
+        # Just put the device to sleep: leave it alone for a while. 6 min also
+        # outlasts firmware that ignores "z" (it idles 5 min unlinked, then
+        # sleeps) -- reconnecting sooner just keeps such a device awake forever.
+        # Still shorter than the 10-min timer wake, so no wake is missed.
+        quiet = IDLE_QUIET_SECS - (time.time() - _idle_sleep_sent_at)
         if quiet > 0:
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=quiet)

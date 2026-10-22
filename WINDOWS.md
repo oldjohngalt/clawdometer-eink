@@ -1,8 +1,8 @@
 # Clawdometer on Windows
 
-Tested on Windows 11 with Python 3.14 and a Waveshare ESP32-S3-ePaper-1.54. The
-firmware is unchanged (it still says "waiting for Mac..." until the first push —
-cosmetic).
+Tested on Windows 11 with Python 3.14 and a Waveshare ESP32-S3-ePaper-1.54. Flash
+this fork's firmware: it adds the adjustable volume (`v`) and idle deep sleep (`z`)
+the daemon uses. Upstream firmware still works, without those two.
 
 ## 1. Firmware
 

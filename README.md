@@ -1,5 +1,9 @@
 # Clawdometer E-Ink 🦀
 
+> **This is a fork** of [nsyll/clawdometer-eink](https://github.com/nsyll/clawdometer-eink), created by [Nektarios Sylligardakis](https://github.com/nsyll), who designed and built Clawdometer. All credit for the original goes to him.
+>
+> This fork adds Windows support (see [WINDOWS.md](WINDOWS.md)), adjustable chime volume, idle deep sleep for longer battery life, status from remote Claude Code machines over SSH, and showing the most urgent session when several run at once.
+
 **A Claude Code usage monitor on an e-ink desk gadget** — rate-limit meters with reset countdowns, live WORKING / NEEDS YOU / QUESTION / DONE status, usage statistics, and a bell that rings the moment Claude Code **needs you**, **asks you a question**, or **finishes its work**.
 
 Runs on a single off-the-shelf board — the **Waveshare ESP32-S3-ePaper-1.54** — with zero wiring and zero soldering. E-ink means it sits on your desk like a printed card: silent, always readable, about a week per battery charge.

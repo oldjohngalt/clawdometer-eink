@@ -61,6 +61,8 @@ CONFIG_FILE = Path.home() / ".config" / "claude-usage-monitor" / "config"
 # Claude Code interaction status, written by the CC hook (~/.clawd/cc_status_hook.py).
 CC_STATUS_FILE = Path.home() / ".clawd" / "cc_status.json"
 CC_STALE_SECS = 30 * 60  # drop the banner if CC has been silent this long
+# Which session's status the device shows when several are live.
+CC_PRIORITY = {"needs-you": 3, "question": 2, "working": 1, "done": 0}
 
 # Local Claude Code usage stats, derived from the transcript logs (backfilled).
 CC_LOG_GLOB = str(Path.home() / ".claude" / "projects" / "*" / "*.jsonl")
@@ -798,19 +800,35 @@ def read_idle_sleep_secs() -> int:
     return 15 * 60
 
 
-def cc_idle_seconds() -> float:
-    """Seconds since the newest Claude Code hook event (local or remote)."""
-    newest = 0
-    sources = list(_remote_cc.values())
+def _ts_of(d: dict) -> int:
     try:
-        sources.append(json.loads(CC_STATUS_FILE.read_text()))
+        return int(d.get("ts", 0))
+    except (ValueError, TypeError, AttributeError):
+        return 0
+
+
+def cc_session_statuses() -> list[dict]:
+    """Every Claude Code session's status, from the local file and each remote
+    host. A file with a "sessions" map yields one entry per session; an older
+    hook's single-status file yields itself."""
+    files = list(_remote_cc.values())
+    try:
+        files.append(json.loads(CC_STATUS_FILE.read_text(encoding="utf-8")))
     except (OSError, ValueError, TypeError):
         pass
-    for d in sources:
-        try:
-            newest = max(newest, int(d.get("ts", 0)))
-        except (ValueError, TypeError, AttributeError):
-            pass
+    out = []
+    for f in files:
+        if not isinstance(f, dict):
+            continue
+        sessions = f.get("sessions")
+        entries = sessions.values() if isinstance(sessions, dict) else [f]
+        out += [d for d in entries if isinstance(d, dict) and d.get("state")]
+    return out
+
+
+def cc_idle_seconds() -> float:
+    """Seconds since the newest Claude Code hook event (local or remote)."""
+    newest = max((_ts_of(d) for d in cc_session_statuses()), default=0)
     return time.time() - newest if newest else float("inf")
 
 
@@ -825,32 +843,18 @@ def read_cc_status() -> dict:
     the file is absent, malformed, or older than CC_STALE_SECS (so a crashed or
     long-idle CC session doesn't pin a stale banner on the device).
     "cc"  = state (working|needs-you|done), "ccm" = short message, "cct" = ts.
-    The local file and any streamed remote hosts are merged: newest ts wins.
+    Across all sessions on all hosts the most urgent state wins (CC_PRIORITY),
+    newest first among equals: one busy session must not hide another that is
+    waiting on the user.
     """
-    candidates = list(_remote_cc.values())
-    try:
-        candidates.append(json.loads(CC_STATUS_FILE.read_text()))
-    except (OSError, ValueError, TypeError):
-        pass
-
-    def ts_of(d) -> int:
-        try:
-            return int(d.get("ts", 0))
-        except (ValueError, TypeError, AttributeError):
-            return 0
-    candidates = [d for d in candidates if isinstance(d, dict) and d.get("state")]
-    if not candidates:
+    now = time.time()
+    fresh = [d for d in cc_session_statuses()
+             if not _ts_of(d) or now - _ts_of(d) <= CC_STALE_SECS]
+    if not fresh:
         return {}
-    d = max(candidates, key=ts_of)
-    state = str(d.get("state", "")).strip()
-    if not state:
-        return {}
-    try:
-        ts = int(d.get("ts", 0))
-    except (ValueError, TypeError):
-        ts = 0
-    if ts and (time.time() - ts) > CC_STALE_SECS:
-        return {}
+    d = max(fresh, key=lambda d: (CC_PRIORITY.get(str(d["state"]).strip(), 0), _ts_of(d)))
+    state = str(d["state"]).strip()
+    ts = _ts_of(d)
     out = {"cc": state[:12], "cct": ts}
     msg = str(d.get("message", "")).strip()
     if msg:

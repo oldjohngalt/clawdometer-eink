@@ -55,17 +55,25 @@ Device-side redraw policy: only `s`, `w`, `st`, and the `cc` **state** trigger a
 ```json
 { "state": "working" | "needs-you" | "question" | "done",
   "message": "<short context, ≤80 chars>",
-  "ts": 1783076670 }
+  "ts": 1783076670,
+  "sessions": { "<session id, 8 chars>": { "state": ..., "message": ..., "ts": ... }, ... } }
 ```
 
-The daemon forwards it as `cc`/`ccm`/`cct` and drops it when `ts` is older than 30 minutes (a crashed session must not pin a stale banner).
+Top-level fields are the latest event (for daemons that predate `sessions`). Each session's
+own status lives in `~/.clawd/sessions/<id>.json`; the hook rebuilds the map on every event,
+removes a session on `SessionEnd`, and prunes files untouched for 30 minutes.
+
+The daemon gathers every session from this file and each `remote_status` host, drops
+entries older than 30 minutes (a crashed session must not pin a stale banner), and forwards
+the most urgent as `cc`/`ccm`/`cct`: `needs-you` > `question` > `working` > `done`, newest
+first among equals. A busy session never hides one that is waiting on the user.
 
 ### State semantics
 
 | state | meaning | device banner | jingle |
 |---|---|---|---|
 | `working` | Claude is running (prompt submitted / tool executing) | `WORKING` + tool name | — |
-| `needs-you` | permission prompt or idle-waiting | `NEEDS YOU` (inverted) + reason | knock-knock |
+| `needs-you` | permission prompt (the idle "waiting for input" reminder is ignored) | `NEEDS YOU` (inverted) + reason | knock-knock |
 | `question` | Claude ended its turn asking the user something | `QUESTION` (inverted) + the question | rising "hm-hmm?" |
 | `done` | turn finished, nothing pending | *(no banner)* | ta-daa (only on working→done) |
 

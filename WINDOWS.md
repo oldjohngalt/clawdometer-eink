@@ -79,7 +79,9 @@ Bash, so use forward slashes and quote the full interpreter path):
     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "\"C:/Users/<you>/AppData/Local/Microsoft/WindowsApps/python.exe\" \"C:/Users/<you>/.clawd/cc_status_hook.py\"" }] }],
     "PreToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "<same command>" }] }],
     "Notification": [{ "hooks": [{ "type": "command", "command": "<same command>" }] }],
-    "Stop": [{ "hooks": [{ "type": "command", "command": "<same command>" }] }]
+    "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "<same command>" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "<same command>" }] }],
+    "SessionEnd": [{ "hooks": [{ "type": "command", "command": "<same command>" }] }]
   }
 }
 ```

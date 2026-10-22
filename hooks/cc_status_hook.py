@@ -25,6 +25,8 @@ from pathlib import Path
 
 CC_DIR = Path.home() / ".clawd"
 CC_FILE = CC_DIR / "cc_status.json"
+SESS_DIR = CC_DIR / "sessions"
+SESSION_STALE_SECS = 30 * 60  # matches the daemon's CC_STALE_SECS
 
 # The device draws the question in a small ~10px font across 180px — about 34
 # chars. Isolate the final question sentence and trim it to fit.
@@ -122,9 +124,14 @@ def main() -> int:
         except Exception:
             q = ""
         state, message = "question", q
-    elif event in ("UserPromptSubmit", "PreToolUse"):
+    elif event in ("UserPromptSubmit", "PreToolUse", "PostToolUse"):
+        # PostToolUse: clears a needs-you as soon as an approved tool finishes.
         # "working" — message hints at what (the tool about to run, if any).
         state, message = "working", tool
+    elif event == "Notification" and data.get("notification_type") == "idle_prompt":
+        # "waiting for your input" after a finished turn: the session is already
+        # done/question. As needs-you it would outrank everything for 30 min.
+        return 0
     elif event == "Notification":
         # The key one: permission asks / idle-waiting. message has the reason.
         state, message = "needs-you", str(data.get("message", "") or "")
@@ -139,22 +146,60 @@ def main() -> int:
         except Exception:
             q = None  # heuristics must never break the hook
         state, message = ("question", q) if q else ("done", "")
+    elif event == "SessionEnd":
+        state, message = None, ""  # drop this session's entry
     else:
         return 0  # unknown event — leave the file untouched
 
-    payload = {"state": state, "message": message[:80], "ts": int(time.time())}
-
+    payload = None
+    if state:
+        payload = {"state": state, "message": message[:80], "ts": int(time.time())}
     try:
-        CC_DIR.mkdir(parents=True, exist_ok=True)
-        # Atomic write so the daemon never reads a half-written file.
-        fd, tmp = tempfile.mkstemp(dir=str(CC_DIR), prefix=".cc_status.")
-        with os.fdopen(fd, "w") as f:
-            json.dump(payload, f)
-        os.replace(tmp, str(CC_FILE))
+        write_status(payload, str(data.get("session_id", "") or "default"))
     except OSError:
         pass  # best-effort; never fail the hook
 
     return 0
+
+
+def _atomic_write(path, obj):
+    # Atomic so the daemon never reads a half-written file.
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp.")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(obj, f)
+    os.replace(tmp, str(path))
+
+
+def write_status(payload, session_id):
+    """Record this session's status (None = session ended), then rebuild
+    CC_FILE from every live session. Each session owns its own file, so
+    concurrent hooks can't drop each other's state; the daemon picks which
+    session to show. Top-level fields stay the latest event for older daemons."""
+    SESS_DIR.mkdir(parents=True, exist_ok=True)
+    sid = "".join(c for c in session_id if c.isalnum() or c == "-")[:64] or "default"
+    own = SESS_DIR / (sid + ".json")
+    if payload:
+        _atomic_write(own, payload)
+    else:
+        try:
+            own.unlink()
+        except OSError:
+            pass
+    now = time.time()
+    sessions = {}
+    for p in SESS_DIR.glob("*.json"):
+        try:
+            if now - p.stat().st_mtime > SESSION_STALE_SECS:
+                p.unlink()  # crashed / abandoned session
+                continue
+            d = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(d, dict):
+            sessions[p.stem[:8]] = d
+    top = payload or max(sessions.values(), key=lambda d: d.get("ts", 0),
+                         default={"state": "done", "message": "", "ts": int(now)})
+    _atomic_write(CC_FILE, dict(top, sessions=sessions))
 
 
 if __name__ == "__main__":

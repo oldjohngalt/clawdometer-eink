@@ -737,7 +737,10 @@ async def fetch_remote_status(host: str) -> tuple[dict | None, str]:
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=15)
     except asyncio.TimeoutError:
-        proc.kill()
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass  # exited just as the timeout fired
         await proc.wait()
         return None, "timed out"
     if proc.returncode != 0:

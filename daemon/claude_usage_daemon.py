@@ -687,12 +687,19 @@ def add_clock_fields(payload: dict) -> None:
 
 
 # Remote Claude Code hosts (config `remote_status = user@host[, ...]`): the hook
-# writes ~/.clawd/cc_status.json there, and one long-lived ssh per host streams it
-# here. The ssh key should be restricted on the remote side to exactly
+# writes ~/.clawd/cc_status.json there, and a short ssh every REMOTE_POLL_SECS
+# reads it. The ssh key should be restricted on the remote side to exactly
 # REMOTE_STATUS_CMD (authorized_keys command="..."), so it can't open a shell.
-REMOTE_STATUS_CMD = ('while :; do cat ~/.clawd/cc_status.json 2>/dev/null || printf "{}"; '
-                     'echo; sleep 2; done')
-_remote_cc: dict[str, dict] = {}   # host -> latest status dict streamed from it
+# One-shot polls instead of a long-lived stream: nothing to wedge across laptop
+# sleep, network changes, or VM reboots -- the next poll just works again.
+REMOTE_STATUS_CMD = "cat ~/.clawd/cc_status.json 2>/dev/null || echo {}"
+REMOTE_POLL_SECS = 5
+# Unreachable this long -> forget the host's status, so a dead link can't pin a
+# NEEDS YOU banner on the device.
+REMOTE_STALE_SECS = 60
+_remote_cc: dict[str, dict] = {}     # host -> latest status dict read from it
+_remote_seen: dict[str, float] = {}  # host -> time of the last good read
+_remote_err: dict[str, str] = {}     # host -> last error (log on change only)
 
 
 def read_remote_hosts() -> list[str]:
@@ -710,52 +717,64 @@ def read_remote_hosts() -> list[str]:
     return []
 
 
-async def stream_remote_status(host: str, stop_event: asyncio.Event) -> None:
-    """Keep an ssh stream of `host`'s status file open, reconnecting with backoff."""
+async def fetch_remote_status(host: str) -> tuple[dict | None, str]:
+    """One ssh read of `host`'s status file. Returns (status, "") or (None, error)."""
     key = Path.home() / ".ssh" / "id_ed25519_clawd"
-    args = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15",
-            "-o", "ServerAliveCountMax=2", "-o", "ConnectTimeout=10"]
+    args = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
     if key.exists():
         args += ["-i", str(key), "-o", "IdentitiesOnly=yes"]
     args += [host, REMOTE_STATUS_CMD]
     # pythonw has no console; without this every ssh launch flashes a window.
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    backoff = 5
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE, creationflags=flags)
+    except OSError as e:
+        return None, f"cannot start ssh: {e}"
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=15)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return None, "timed out"
+    if proc.returncode != 0:
+        lines = err.decode("utf-8", "replace").strip().splitlines()
+        return None, f"ssh rc={proc.returncode}" + (f": {lines[-1]}" if lines else "")
+    try:
+        d = json.loads(out.decode("utf-8-sig", "replace") or "{}")
+    except ValueError:
+        return None, "unreadable status file"
+    return (d, "") if isinstance(d, dict) else (None, "unreadable status file")
+
+
+async def poll_remote_status(stop_event: asyncio.Event) -> None:
+    """Read every configured host's status every REMOTE_POLL_SECS. Never raises."""
     while not stop_event.is_set():
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE, creationflags=flags)
-        except OSError as e:
-            log(f"Remote {host}: cannot start ssh: {e}")
-            return
-        log(f"Remote {host}: streaming status")
-        got_any = False
-        try:
-            while not stop_event.is_set():
-                line = await proc.stdout.readline()
-                if not line:
-                    break
-                try:
-                    d = json.loads(line.decode("utf-8", "replace"))
-                except ValueError:
-                    continue
-                if isinstance(d, dict):
+            hosts = read_remote_hosts()   # re-read so config edits apply live
+            for h in list(_remote_cc):
+                if h not in hosts:
+                    _remote_cc.pop(h, None)
+            results = await asyncio.gather(*(fetch_remote_status(h) for h in hosts))
+            now = time.time()
+            for host, (d, err) in zip(hosts, results):
+                if d is not None:
+                    if host in _remote_err or host not in _remote_seen:
+                        log(f"Remote {host}: reachable")
+                    _remote_err.pop(host, None)
                     _remote_cc[host] = d
-                    got_any = True
-        finally:
-            if proc.returncode is None:
-                proc.kill()
-            err = (await proc.stderr.read()).decode("utf-8", "replace").strip()
-            await proc.wait()
-        _remote_cc.pop(host, None)
-        if stop_event.is_set():
-            return
-        log(f"Remote {host}: ssh ended (rc={proc.returncode})"
-            + (f": {err.splitlines()[-1]}" if err else ""))
-        backoff = 5 if got_any else min(backoff * 2, 300)
+                    _remote_seen[host] = now
+                    continue
+                if _remote_err.get(host) != err:
+                    log(f"Remote {host}: {err}")
+                    _remote_err[host] = err
+                if now - _remote_seen.get(host, 0) > REMOTE_STALE_SECS:
+                    _remote_cc.pop(host, None)
+        except Exception as e:  # a poller bug must never take the daemon down
+            log(f"Remote poll error: {e!r}")
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=backoff)
+            await asyncio.wait_for(stop_event.wait(), timeout=REMOTE_POLL_SECS)
         except asyncio.TimeoutError:
             pass
 
@@ -1342,8 +1361,7 @@ async def main() -> None:
 
     log(f"=== Claude Usage Tracker Daemon (BLE, {sys.platform}) ===")
     log(f"Poll interval: {POLL_INTERVAL}s")
-    remote_tasks = [asyncio.create_task(stream_remote_status(h, stop_event))
-                    for h in read_remote_hosts()]  # noqa: F841 (kept alive by the loop)
+    remote_task = asyncio.create_task(poll_remote_status(stop_event))  # noqa: F841
 
     backoff = 1
     skip_addr: str | None = None  # macOS: a peripheral to skip for one cycle

@@ -59,6 +59,7 @@ per line, re-read every poll (no restart needed):
 ```
 volume=75      # chime volume 0-100 (0 silent, 50 = upstream default, 100 = max); device plays a preview on change
 idle_sleep=15  # minutes of Claude Code inactivity before the device deep-sleeps (0 = stay linked)
+remote_status=user@host  # read Claude Code status from other machines (section 5)
 chime=on       # session-reset chime
 clock=auto     # show the time (auto|12|24|off)
 ```
@@ -84,6 +85,34 @@ Bash, so use forward slashes and quote the full interpreter path):
 ```
 
 Restart open Claude Code sessions afterwards (hooks load at session start).
+
+## 5. Remote Claude Code sessions (optional)
+
+Remote Control sessions run on the remote machine, so their hooks fire there. Install
+the hook on that machine (same as above, Linux paths, `python3`), then let the daemon
+read its status file over ssh every 5 s with a key that can do nothing else:
+
+```powershell
+ssh-keygen -t ed25519 -f $HOME\.ssh\id_ed25519_clawd -N '""' -C clawdometer-status
+```
+
+On the remote machine, append the public key to `~/.ssh/authorized_keys` with a
+forced command (one line):
+
+```
+command="cat ~/.clawd/cc_status.json 2>/dev/null || echo {}",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding ssh-ed25519 AAAA... clawdometer-status
+```
+
+Accept the host key once, which also tests it (should print the status JSON):
+
+```powershell
+ssh -i $HOME\.ssh\id_ed25519_clawd user@host
+```
+
+Then add `remote_status=user@host` (comma-separate several) to the config. The newest
+status across all machines wins; a host unreachable for 60 s is dropped so a dead link
+can't pin a NEEDS YOU banner. Keep the remote clock NTP-synced (statuses are compared
+by timestamp).
 
 ## Windows-specific changes
 

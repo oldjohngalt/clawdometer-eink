@@ -1406,6 +1406,16 @@ async def main() -> None:
         except Exception as e:  # any BLE-stack surprise = a dropped link, never a dead daemon
             log(f"Link error: {type(e).__name__}: {e}")
             ok = False
+        except asyncio.CancelledError:
+            # WinRT bleak raises CancelledError when Windows aborts GATT service
+            # discovery mid-connect. It's a BaseException, so the net above
+            # misses it and it killed the daemon (device then slept for days).
+            # Only a real cancellation of *this* task may propagate.
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                raise
+            log("Link error: BLE stack cancelled the operation")
+            ok = False
         if not ok:
             if sys.platform == "darwin":
                 # No string cache to drop; instead skip this stale handle on
@@ -1433,7 +1443,7 @@ if __name__ == "__main__":
             break
         except KeyboardInterrupt:
             sys.exit(0)
-        except Exception:
+        except (Exception, asyncio.CancelledError):  # CancelledError isn't an Exception
             import traceback
             log("Daemon crashed; restarting in 30s: " + traceback.format_exc())
             time.sleep(30)

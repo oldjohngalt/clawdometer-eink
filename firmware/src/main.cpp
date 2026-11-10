@@ -58,6 +58,23 @@ static RTC_DATA_ATTR bool g_everLinked = false;  // daemon seen since power-on (
 static unsigned long g_lastLinkMs = 0;   // last time the BLE link was up (or a button woke us)
 static unsigned long g_lastDataMs = 0;   // last daemon push
 static bool g_sniff = false;             // in a timer-wake sniff window
+// On external power there's no battery to save, so never sleep. The board has
+// no VBUS sense: usbPowered() only sees a USB *data* host (SOF frames), so a
+// wall charger is inferred from the pack sitting at full (~4.07 V on charge).
+// Hysteresis: arm at >=98%, disarm below 90% — after unplugging a full pack it
+// stays awake until ~90% (roughly half an hour), then sleeps normally.
+// The daemon is told via a "u" notify so it stops sending "z" and dropping the
+// link; otherwise it would go quiet for 6 min and the screen would go stale.
+static bool g_onUsb = false;             // "on external power" (USB host or full pack)
+static RTC_DATA_ATTR bool g_battFull = false;
+static const unsigned long USB_CHECK_MS = 10UL * 1000;
+
+static bool onExternalPower() {
+  int b = batteryPercent();
+  if (b >= 98) g_battFull = true;
+  else if (b >= 0 && b < 90) g_battFull = false;
+  return g_battFull || usbPowered();
+}
 // Daemon "z":1 = nothing is happening, sleep now instead of idling awake for
 // UNLINKED_SLEEP_MS after it disconnects. Ignored for 2 min after a button press
 // so the user can still look at the stats views.
@@ -201,6 +218,7 @@ void setup() {
   sensorsBegin();            // brings up the I2C bus (needed before audioInit)
   audioInit();               // ES8311 codec + I2S (amp stays off until a chime)
 
+  g_onUsb = onExternalPower();
   g_prefs.begin("clawd", false);
   g_chimeOn = g_prefs.getBool("chime", true);   // default on
 
@@ -237,14 +255,25 @@ void loop() {
   // the (useful) last image — don't let a dataless link flip wipe it.
   bool linkedNow = ble.connected();
   if (linkedNow) { g_lastLinkMs = now; g_everLinked = true; }
+  bool justLinked = linkedNow && !g_st.linked;
   if (linkedNow != g_st.linked) {
     g_st.linked = linkedNow;
     if (g_st.haveData || !g_sleptBadge) g_dirty = true;
   }
 
+  // Re-check USB periodically (plug/unplug) and keep the daemon told; also on
+  // every new link, so it knows before its first idle check.
+  static unsigned long lastUsbMs = 0;
+  if (justLinked || lastUsbMs == 0 || now - lastUsbMs >= USB_CHECK_MS) {
+    lastUsbMs = now;
+    g_onUsb = onExternalPower();
+    if (g_onUsb) { g_sniff = false; g_sleepReq = false; }
+    if (g_onUsb && linkedNow) ble.notify("u");
+  }
+
   // SLEEP decisions (before any render): nobody around -> deep sleep.
   if (g_sniff && now > g_sniffDeadline) goToSleep();
-  if (!g_sniff) {
+  if (!g_sniff && !g_onUsb) {
     unsigned long unlinkedLimit = g_everLinked ? UNLINKED_SLEEP_MS : NEVERLINKED_SLEEP_MS;
     if (!linkedNow && now - g_lastLinkMs > unlinkedLimit)   goToSleep();
     if (linkedNow  && now - g_lastDataMs > SILENT_SLEEP_MS) goToSleep();
@@ -348,7 +377,7 @@ void loop() {
   }
 
   // After this pass's redraw and chime, so the panel shows the final state.
-  if (g_sleepReq) { g_sleepReq = false; goToSleep(); }
+  if (g_sleepReq) { g_sleepReq = false; if (!g_onUsb) goToSleep(); }
 
   delay(50);
 }

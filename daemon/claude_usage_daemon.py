@@ -1138,8 +1138,19 @@ class Session:
     def __init__(self, client: BleakClient) -> None:
         self.client = client
         self.refresh_requested = asyncio.Event()
+        self.connected_at = time.time()
+        self.usb_seen_at = 0.0   # last "u" notify: device is on USB power
+
+    def on_usb(self) -> bool:
+        # Device repeats "u" every 10s while on USB; 30s tolerates a lost notify.
+        return time.time() - self.usb_seen_at < 30
 
     def _on_refresh(self, _char, _data: bytearray) -> None:
+        if bytes(_data) == b"u":
+            if not self.on_usb():
+                log("Device is on USB power; idle sleep paused")
+            self.usb_seen_at = time.time()
+            return
         log("Refresh requested by device")
         self.refresh_requested.set()
 
@@ -1322,7 +1333,12 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
             # pushed_cc stays stale, so the next tick retries automatically.
             cc = read_cc_status()
             idle_limit = read_idle_sleep_secs()
-            idle = idle_limit > 0 and cc_idle_seconds() >= idle_limit
+            # On USB the device won't sleep anyway; sending "z" would only drop
+            # the link and leave the screen stale for IDLE_QUIET_SECS. The 15s
+            # grace gives a fresh link time to hear the device's first "u".
+            idle = (idle_limit > 0 and cc_idle_seconds() >= idle_limit
+                    and not session.on_usb()
+                    and time.time() - session.connected_at > 15)
             if last_payload is not None and (cc != pushed_cc or idle):
                 payload = dict(last_payload)
                 payload.update(cc)

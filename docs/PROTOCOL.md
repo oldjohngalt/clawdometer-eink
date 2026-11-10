@@ -11,6 +11,8 @@ Three tiny interfaces glue the system together.
 | RX characteristic (daemon **writes** JSON here) | `4c41555a-4465-7669-6365-000000000002` |
 | REQ characteristic (device **notifies** to request a refresh) | `4c41555a-4465-7669-6365-000000000004` |
 
+REQ notify values: any value requests a refresh, except `u` — "I'm on external power". The device sends `u` on each new link and every 10 s while on power: a USB data host, or (no VBUS sense on this board, so a wall charger is inferred) the pack at full — armed at ≥98%, cleared below 90%. While `u` keeps arriving, the daemon doesn't send `z`, and the device ignores `z` and its own sleep timeouts.
+
 The device requests MTU 512 — the payload (~450 B) must fit one write. Writes are `write-without-response`.
 
 ## 2. BLE JSON payload (daemon → device, every ~60 s)

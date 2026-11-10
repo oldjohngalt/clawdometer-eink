@@ -296,6 +296,14 @@ void loop() {
     }
   }
 
+  // Calibration aid: raw pack voltage on serial (USB only — nothing else reads it).
+  static unsigned long lastBattLogMs = 0;
+  if (millis() - lastBattLogMs >= 10000UL) {
+    lastBattLogMs = millis();
+    Serial.printf("[Batt] %.3f V  %d%%  usb=%d\n",
+                  batteryVolts(), batteryPercent(), usbPowered());
+  }
+
   // low-battery jingle: once per discharge (re-arms after charging past 15%)
   static bool lowBattChimed = false;
   if (g_st.batt >= 0 && g_st.batt < 10 && !lowBattChimed) {
